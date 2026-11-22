@@ -1,0 +1,124 @@
+# G5 NEKIA-REUSE-UNCHECKED の PR の確かめ（形だけ）: NEKIA の外のリポの PR の本文に nekia_reuse の 1 行があるかを照らす。
+#   nekia_reuse: use <NEKIA の働きの name…>      NEKIA の働きを使う（name は NEKIA の働きの一覧の name）
+#   nekia_reuse: bridge <決めの id> <YYYY-MM-DD>  決めのあるつなぎ（止める日に外の作りを止める）
+#   nekia_reuse: none <NEKIA に無い訳>            NEKIA に無い（NEKIA の何を見て何が無かったか）
+# なぜ: 全部の事業を下で回す土台の製品（NEKIA）を広げて使う決めなのに、同じ働きを外のリポで作り直していた（2026-11-23 の調べ）。
+# 正本は RYKNSH/ryknsh-brain の brain/templates/nekia-reuse.yml（全部の外のリポで同じ字・手で書き換えない・直すのは brain の側だけ）。
+#   判定は brain の brain/tools/nekia_reuse.py の pr_line_problem と同じで、brain の試験が字の一致を照らす。
+#   中身の照らし（働きの一覧の name・決めの記録・一覧の日付）は HQ リポの毎時のジョブが canon_audit.py reuse-pr でする（このリポからは brain を読めない）。
+# SINCE より前に立てた PR は照らさない（入れた瞬間に今の open の PR を全部赤にしない・HQ リポの設定の rows.since と同じ時刻）。
+#   立てた時刻が読めない PR は照らす（MR-17）。
+# 秘密は使わない・書き込みはしない。必須のチェックにはしていない（ブランチの保護はオーナーの設定）。
+# ロールバック手順: このファイルを消す。
+name: nekia-reuse
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  nekia-reuse:
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: PR の本文の nekia_reuse の 1 行（形だけ）
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+        run: |
+          python3 -I - <<'PY'
+          import datetime, os, re, sys
+
+          KINDS = ("use", "bridge", "none")
+          NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,80}$")
+          DECISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,160}$")
+          DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+          LINE_RE = re.compile(r"^[ \t]*(?:[-*][ \t]+)?nekia_reuse:[ \t]*(.*?)[ \t]*$")
+          FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
+          WHY_MIN = 4
+          HOLD = {"-", "--", "…", "...", "なし", "無し", "ない", "理由", "訳", "tbd", "todo", "n/a", "na", "none", "<理由>", "<訳>", "<reason>", "<why>"}
+          SEP = "・"
+          SINCE = "2026-11-24T00:00:00+09:00"
+
+
+          def is_date(s):
+              if not DATE_RE.match(s):
+                  return False
+              y, m, d = (int(x) for x in s.split("-"))
+              if y < 1 or not 1 <= m <= 12 or d < 1:
+                  return False
+              leap = y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
+              return d <= (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)[m - 1]
+
+
+          def before_since(created_at):
+              """PR を立てた時刻が SINCE より前なら True（照らさない）。読めなければ False（照らす）。"""
+              try:
+                  t = datetime.datetime.fromisoformat((created_at or "").strip().replace("Z", "+00:00"))
+              except ValueError:
+                  return False
+              if t.tzinfo is None:
+                  return False
+              return t < datetime.datetime.fromisoformat(SINCE)
+
+
+          def check(body):
+              """PR の本文 → 訳の字か None（brain の pr_line_problem と同じ）。"""
+              lines = (body if isinstance(body, str) else "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+              fence, found = None, []
+              for ln in lines:
+                  m = FENCE_RE.match(ln)
+                  if m:
+                      fence = m.group(1) if fence is None else (None if fence == m.group(1) else fence)
+                      continue
+                  if fence:
+                      continue
+                  m = LINE_RE.match(ln)
+                  if m:
+                      found.append(m.group(1))
+              if not found:
+                  return "PR の本文に nekia_reuse の行が無い（nekia_reuse: use <働き…> ／ bridge <決めの id> <YYYY-MM-DD> ／ none <訳>）"
+              if len(found) > 1:
+                  return f"nekia_reuse の行が {len(found)} 行ある（1 行だけにする）"
+              parts = found[0].split(None, 1)
+              if not parts:
+                  return "nekia_reuse の行に中身が無い"
+              kind, rest = parts[0], (parts[1] if len(parts) > 1 else "")
+              out = []
+              if kind == "use":
+                  uses = [x for x in re.split(r"[\s,、，]+", rest) if x]
+                  if not uses or not all(NAME_RE.match(x) for x in uses):
+                      out.append("uses が NEKIA の働きの name の list でない（空か形が違う）")
+                  elif len(set(uses)) != len(uses):
+                      out.append("uses に同じ name が 2 回")
+              elif kind == "bridge":
+                  toks = rest.split()
+                  if len(toks) != 2:
+                      return "bridge の後は <決めの id> <YYYY-MM-DD> の 2 つ"
+                  if not DECISION_RE.match(toks[0]):
+                      out.append("decision が決めの記録の id の形でない")
+                  if not is_date(toks[1]):
+                      out.append("stop_on が YYYY-MM-DD の日付でない")
+              elif kind == "none":
+                  if len(rest.strip()) < WHY_MIN or rest.strip().lower() in HOLD:
+                      out.append(f"why（NEKIA に無い訳）が空か仮の字（{WHY_MIN} 字以上で、NEKIA の何を見て何が無かったか）")
+              else:
+                  return "nekia_reuse の行の頭が use・bridge・none のどれでもない"
+              return SEP.join(out) if out else None
+
+
+          if __name__ == "__main__":
+              if before_since(os.environ.get("PR_CREATED_AT", "")):
+                  print(f"nekia_reuse: {SINCE} より前に立てた PR は照らさない")
+                  sys.exit(0)
+              p = check(os.environ.get("PR_BODY", ""))
+              if p:
+                  print(f"::error title=G5 NEKIA-REUSE-UNCHECKED::{p}")
+                  print(f"G5 NEKIA-REUSE-UNCHECKED: {p}")
+                  sys.exit(1)
+              print("nekia_reuse の 1 行: 形は通る（中身は HQ リポの毎時のジョブが照らす）")
+          PY
